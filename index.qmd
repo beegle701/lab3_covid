@@ -1,11 +1,211 @@
 ---
 title: "lab3_covid"
+subtitle: "Ecosystem Science and Sustainability 330"
+author: 
+  - name: Nick Beegle
+    email: beegle99@colostate.edu
+format: html
+execute: 
+  echo: true
 ---
 
-This is a Quarto website.
+# Introduction
 
-To learn more about Quarto websites visit <https://quarto.org/docs/websites>.
+This report analyzes COVID-19 county-level data for Colorado and other states using NY Times' dataset, focusing on cumulative cases, new cases, normalized data, trends, spatial patterns, and cross-state comparisons.
+
+## Libraries & Data Setup
 
 ```{r}
-1 + 1
+# Load necessary libraries
+library(tidyverse)
+library(flextable)
+library(zoo)
+
+# Read NYT COVID-19 county-level data
+covid_data <- read_csv('https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-counties.csv')
+
+# Set parameters for date and state
+my.date <- as.Date("2022-02-01")
+my.state <- "Colorado"
 ```
+
+------------------------------------------------------------------------
+
+# Question 1: The Importance of Public Data
+
+**Reflection:**\
+Open, reliable datasets are essential for public health, environmental monitoring, and policy decisions. Access to up-to-date and historical data allows scientists to model trends, predict future needs, and hold agencies accountable. Without this access, we lose transparency, real-time insights, and may hinder effective responses to crises like pandemics.
+
+------------------------------------------------------------------------
+
+# Question 2: Daily Summary for Colorado
+
+```{r}
+# Filter data for Colorado and calculate new cases and deaths
+co_data <- covid_data %>%
+  filter(state == my.state) %>%
+  arrange(county, date) %>%
+  group_by(county) %>%
+  mutate(
+    new_cases = cases - lag(cases, default = 0),
+    new_deaths = deaths - lag(deaths, default = 0)
+  ) %>%
+  ungroup()
+
+# Data for target date
+co_today <- co_data %>% filter(date == my.date)
+
+# Top 5 counties cumulative cases
+top_cum_cases <- co_today %>%
+  arrange(desc(cases)) %>%
+  slice(1:5) %>%
+  select(County = county, `Cumulative Cases` = cases) %>%
+  flextable() %>%
+  set_caption("Top 5 Colorado Counties by Cumulative COVID-19 Cases")
+
+top_cum_cases
+
+# Top 5 counties new cases
+top_new_cases <- co_today %>%
+  arrange(desc(new_cases)) %>%
+  slice(1:5) %>%
+  select(County = county, `New Cases` = new_cases) %>%
+  flextable() %>%
+  set_caption("Top 5 Colorado Counties by New COVID-19 Cases")
+
+top_new_cases
+```
+
+------------------------------------------------------------------------
+
+# Question 3: Normalizing Data with Population
+
+```{r}
+# Read population data
+pop_url <- 'https://www2.census.gov/programs-surveys/popest/datasets/2020-2023/counties/totals/co-est2023-alldata.csv'
+pop_data <- read_csv(pop_url)
+
+# Create FIPS and filter
+pop_data <- pop_data %>%
+  mutate(
+    STATE = str_pad(STATE, 2, pad = "0"),
+    COUNTY = str_pad(COUNTY, 3, pad = "0"),
+    fips = paste0(STATE, COUNTY)
+  ) %>%
+  filter(COUNTY != "000") %>%
+  select(fips, COUNTY, POP2021 = `POPESTIMATE2021`)
+
+# Join population to COVID data
+co_data_pop <- co_today %>%
+  left_join(pop_data, by = c("fips" = "fips")) %>%
+  mutate(
+    cases_per_capita = cases / POP2021 * 100000,
+    new_cases_per_capita = new_cases / POP2021 * 100000
+  )
+
+# Top 5 counties per capita cumulative cases
+top_cum_pc <- co_data_pop %>%
+  arrange(desc(cases_per_capita)) %>%
+  slice(1:5) %>%
+  flextable() %>%
+  set_caption("Top 5 Colorado Counties by Per Capita Cumulative Cases")
+
+top_cum_pc
+```
+
+------------------------------------------------------------------------
+
+# Question 4: Rolling Thresholds (14-Day)
+
+```{r}
+recent_14 <- co_data %>%
+  filter(date >= my.date - 13 & date <= my.date)
+
+recent_14_sum <- recent_14 %>%
+  group_by(fips, county) %>%
+  summarise(total_new_cases = sum(new_cases, na.rm = TRUE), .groups = "drop") %>%
+  left_join(pop_data, by = "fips") %>%
+  mutate(new_cases_per_100k = (total_new_cases / POP2021) * 100000)
+
+recent_14_sum %>%
+  arrange(desc(new_cases_per_100k)) %>%
+  slice(1:5) %>%
+  flextable()
+
+sum(recent_14_sum$new_cases_per_100k > 100, na.rm = TRUE)
+```
+
+------------------------------------------------------------------------
+
+# Question 5: Death Toll Analysis
+
+```{r}
+deaths_2021 <- co_data %>%
+  filter(year(date) == 2021) %>%
+  group_by(fips, county) %>%
+  summarise(total_covid_deaths = sum(new_deaths, na.rm = TRUE), .groups = "drop") %>%
+  left_join(pop_data, by = "fips") %>%
+  mutate(percent_covid_deaths = (total_covid_deaths / (POP2021 * 0.008)) * 100)
+
+deaths_2021 %>%
+  filter(percent_covid_deaths > 20) %>%
+  ggplot(aes(x = reorder(county, -percent_covid_deaths), y = percent_covid_deaths)) +
+  geom_col(fill = "red") +
+  coord_flip() +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+# Question 6: Multi-State Analysis
+
+```{r}
+states_of_interest <- c("New York", "Colorado", "Alabama", "Ohio")
+
+state_data <- covid_data %>%
+  filter(state %in% states_of_interest) %>%
+  group_by(state, date) %>%
+  summarise(total_cases = sum(cases, na.rm = TRUE), .groups = 'drop') %>%
+  arrange(state, date) %>%
+  group_by(state) %>%
+  mutate(
+    new_cases = total_cases - lag(total_cases, default = 0),
+    new_cases_7day = zoo::rollmean(new_cases, 7, fill = NA, align = "right")
+  )
+
+ggplot(state_data, aes(x = date, y = new_cases, fill = state)) +
+  geom_col(alpha = 0.4) +
+  geom_line(aes(y = new_cases_7day, color = state), size = 1.2) +
+  facet_wrap(~state, scales = "free_y") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+# Question 7: Spatial Weighted Mean Center
+
+```{r}
+centroids <- read_csv('https://raw.githubusercontent.com/mikejohnson51/csu-ess-330/refs/heads/main/resources/county-centroids.csv') %>%
+  mutate(fips = as.character(fips))
+covid_data <- covid_data %>% mutate(fips = as.character(fips))
+
+wmc_simple <- covid_data %>%
+  left_join(centroids, by = "fips") %>%
+  mutate(month = format(date, "%Y-%m")) %>%
+  group_by(month) %>%
+  summarise(
+    lon = mean(LON, na.rm = TRUE),
+    lat = mean(LAT, na.rm = TRUE),
+    cases = sum(cases, na.rm = TRUE)
+  )
+
+library(maps)
+
+ggplot() +
+  geom_polygon(data = map_data("state"), aes(x = long, y = lat, group = group), fill = "gray90", color = "white") +
+  geom_point(data = wmc_simple, aes(x = lon, y = lat, size = cases, color = month), alpha = 0.8) +
+  theme_minimal() +
+  labs(title = "Monthly Mean Center of COVID-19 Cases")
+```
+
+------------------------------------------------------------------------
